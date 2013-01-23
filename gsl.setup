@@ -1,0 +1,10 @@
+;;;  -*- Hen -*-
+
+(use setup-helper-mod)
+
+(verify-extension-name "gsl")
+
+(setup-shared-extension-module 'gsl (extension-version "1.0")
+  #:inline? #t #:types? #t
+  #:compile-options '(-d2 -O3 -lgsl -C -std=c99)
+  #:install-options '((examples "gsl-examples.scm")))
