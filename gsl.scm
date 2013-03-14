@@ -1,7 +1,13 @@
 (module gsl *
 (import chicken scheme foreign)
-(use traversal linear-algebra
-      foreigners define-structure srfi-4)
+(use traversal foreigners define-structure srfi-4)
+(use (except linear-algebra
+             v+ v- v*  v/  k*v k+v v/k v*k v+k
+             m+ m- m*. m/. k*m m+k m/k m*k k+m))
+(use (prefix linear-algebra la-))
+
+;; TODO equal? on matrix/vector, maybe matrix?/vector?
+;;  map, for-each
 
 (foreign-declare "#include <gsl/gsl_matrix_double.h>")
 (foreign-declare "#include <gsl/gsl_math.h>")
@@ -25,12 +31,31 @@
 (define-foreign-type gsl:vector (c-pointer "gsl_vector")
  gsl:vector-handle make-gsl:vector)
 
-(define gsl-matrix-size1 (foreign-lambda* unsigned-int ((gsl:matrix gm))
-                                     "C_return(gm->size1);"))
-(define gsl-matrix-size2 (foreign-lambda* unsigned-int ((gsl:matrix gm))
-                                     "C_return(gm->size2);"))
-(define gsl-vector-size (foreign-lambda* unsigned-int ((gsl:vector gv))
-                                    "C_return(gv->size);"))
+(define-reader-ctor 'gsl-vector
+ (lambda (v) (unless (and (vector? v) (not (matrix? v)))
+         (error "can't convert to a GSL vector, not a vector of numbers"))
+    (vector->gsl v)))
+
+(define-reader-ctor 'gsl-matrix
+ (lambda (v) (unless (matrix? v)
+         (error "can't convert to a GSL matrix, not a matrix of numbers"))
+    (matrix->gsl v)))
+
+(define-record-printer
+ (gsl:vector obj out)
+ (fprintf out "#,(gsl-vector ")
+ (pp-without-newline (gsl->vector obj) out)
+ (fprintf out ")"))
+
+(define-record-printer
+ (gsl:matrix obj out)
+ (fprintf out "#,(gsl-matrix ")
+ (pp-without-newline (gsl->matrix obj) out)
+ (fprintf out ")"))
+
+(define gsl-matrix-size1 (foreign-lambda* unsigned-int ((gsl:matrix gm)) "C_return(gm->size1);"))
+(define gsl-matrix-size2 (foreign-lambda* unsigned-int ((gsl:matrix gm)) "C_return(gm->size2);"))
+(define gsl-vector-size (foreign-lambda* unsigned-int ((gsl:vector gv)) "C_return(gv->size);"))
 
 ;;; Default RNG
 
@@ -58,62 +83,74 @@
 
 (define (vector->f64vector v) (list->f64vector (vector->list v)))
 
-(define (scheme->gsl obj)
- (cond ((matrix? obj)
-        (let ((gm (gsl-matrix-alloc (matrix-rows obj) (matrix-columns obj)))
-              (size (matrix-rows obj)))
-         (let loop ((i 0))
-          (if (= i size)
-              gm
-              (begin
-               ((foreign-lambda* void ((f64vector sm) (gsl:matrix gm) (int i))
-                                 "int j; for(j = 0; j < gm->size2; ++j)
+(define (matrix->gsl obj)
+ (unless (matrix? obj) (error "not a matrix"))
+ (let ((gm (gsl-matrix-alloc (matrix-rows obj) (matrix-columns obj)))
+       (size (matrix-rows obj)))
+  (let loop ((i 0))
+   (if (= i size)
+       gm
+       (begin
+        ((foreign-lambda* void ((f64vector sm) (gsl:matrix gm) (int i))
+                          "int j; for(j = 0; j < gm->size2; ++j)
                                    gsl_matrix_set(gm, i, j, sm[j]);
                                   C_return(0);")
-                (vector->f64vector (vector-ref obj i)) gm i)
-               (loop (+ i 1)))))))
-       ((vector? obj)
-        (let ((gv (gsl-vector-alloc (vector-length obj))))
-         ((foreign-lambda* void ((f64vector sv) (gsl:vector gv))
-                           "int i; for(i = 0; i < gv->size; ++i)
+         (vector->f64vector (vector-ref obj i)) gm i)
+        (loop (+ i 1)))))))
+
+(define (vector->gsl obj)
+ (unless (vector? obj) (error "not a vector"))
+ (let ((gv (gsl-vector-alloc (vector-length obj))))
+  ((foreign-lambda* void ((f64vector sv) (gsl:vector gv))
+                    "int i; for(i = 0; i < gv->size; ++i)
                              gsl_vector_set(gv, i, sv[i]);
                             C_return(0);") (vector->f64vector obj) gv)
-         gv))
+  gv))
+
+(define (->gsl obj)
+ (cond ((matrix? obj) (matrix->gsl obj))
+       ((vector? obj) (vector->gsl obj))
        (else (error "Cannot convert scheme object to a GSL object"))))
 
-(define (gsl->scheme obj)
- (cond ((gsl:matrix? obj)
-        (let* ((size1 ((foreign-lambda* unsigned-int ((gsl:matrix gm))
-                                        "C_return(gm->size1);") obj))
-               (size2 ((foreign-lambda* unsigned-int ((gsl:matrix gm))
-                                        "C_return(gm->size2);") obj))
-               (m (make-matrix size1 size2)))
-         (let loopi ((i 0))
-          (if (= i size1)
-              m
-              (let loopj ((j 0))
-               (if (= j size2)
-                   (loopi (+ i 1))
-                   (begin 
-                    (matrix-set! m i j 
-                                 ((foreign-lambda double "gsl_matrix_get" 
-                                                  gsl:matrix unsigned-int 
-                                                  unsigned-int) 
-                                  obj i j))
-                    (loopj (+ j 1)))))))))
-       ((gsl:vector? obj)
-        (let* ((size ((foreign-lambda* unsigned-int ((gsl:vector gv))
-                                       "C_return(gv->size);") 
-                      obj))
-               (v (make-vector size)))
-         (let loop ((i 0))
-          (if (= i size)
-              v
-              (begin
-               (vector-set! v i ((foreign-lambda double "gsl_vector_get" 
-                                                 gsl:vector unsigned-int) 
-                                 obj i))
-               (loop (+ i 1)))))))
+(define (gsl->matrix obj)
+ (unless (gsl:matrix? obj) (error "not a gsl matrix"))
+ (let* ((size1 ((foreign-lambda* unsigned-int ((gsl:matrix gm))
+                                 "C_return(gm->size1);") obj))
+        (size2 ((foreign-lambda* unsigned-int ((gsl:matrix gm))
+                                 "C_return(gm->size2);") obj))
+        (m (make-matrix size1 size2)))
+  (let loopi ((i 0))
+   (if (= i size1)
+       m
+       (let loopj ((j 0))
+        (if (= j size2)
+            (loopi (+ i 1))
+            (begin 
+             (matrix-set! m i j 
+                          ((foreign-lambda double "gsl_matrix_get" 
+                                           gsl:matrix unsigned-int 
+                                           unsigned-int) 
+                           obj i j))
+             (loopj (+ j 1)))))))))
+
+(define (gsl->vector obj)
+ (unless (gsl:vector? obj) (error "not a gsl vector"))
+ (let* ((size ((foreign-lambda* unsigned-int ((gsl:vector gv))
+                                "C_return(gv->size);") 
+               obj))
+        (v (make-vector size)))
+  (let loop ((i 0))
+   (if (= i size)
+       v
+       (begin
+        (vector-set! v i ((foreign-lambda double "gsl_vector_get" 
+                                          gsl:vector unsigned-int) 
+                          obj i))
+        (loop (+ i 1)))))))
+
+(define (gsl-> obj)
+ (cond ((gsl:matrix? obj) (gsl->matrix obj))
+       ((gsl:vector? obj) (gsl->vector obj))
        (else (error "Cannot convert GSL object to a scheme object"))))
 
 (define gsl-matrix-get
@@ -172,57 +209,54 @@
        ((gsl:matrix? a) (gsl-copy-matrix a))
        (else (error "Incompatible gsl copy types"))))
 
-(define gsl-vector-add!
- (foreign-lambda int "gsl_vector_add" gsl:vector gsl:vector))
-(define gsl-vector-sub!
- (foreign-lambda int "gsl_vector_sub" gsl:vector gsl:vector))
-(define gsl-vector-mul!
- (foreign-lambda int "gsl_vector_mul" gsl:vector gsl:vector))
-(define gsl-vector-div!
- (foreign-lambda int "gsl_vector_div" gsl:vector gsl:vector))
-(define gsl-vector-scale!
- (foreign-lambda int "gsl_vector_scale" gsl:vector double))
-(define gsl-vector-add-constant!
- (foreign-lambda int "gsl_vector_add_constant" gsl:vector double))
+(define-syntax define-gsl-binary-operator
+ (er-macro-transformer
+  (lambda (form rename compare)
+   (let* ((%a (rename 'a)) (%b (rename 'b))
+          (%let (rename 'let)) (%obj (rename 'obj))
+          (flip? (and (> (length form) 5) (equal? (last form) 'flip)))
+          (flip (lambda (a b) (if flip? (list b a) (list a b))))
+          (type-prefix (lambda (a) (if (member a '(matrix vector)) (string->symbol (conc "gsl:" a)) a)))
+          (to-type (lambda (a) (cond ((member a '(matrix vector)) (type-prefix a))
+                                ((member a '(double)) 'number)
+                                (else (error "unknown type")))))
+          (call (lambda (a b)
+                 `(,%let ((,%obj ,a))
+                         ((foreign-lambda int ,(conc "gsl_" (car (flip (fourth form) (fifth form))) "_" (third form))
+                                          ,@(map type-prefix (flip (fourth form) (fifth form))))
+                          ,%obj ,b)
+                          ,%obj))))
+    `(begin (define (,(string->symbol (conc (second form) "!")) ,@(flip %a %b))
+             ,(call %a %b))
+            (define (,(second form) ,@(flip %a %b))
+             (if (and ,@(map (lambda (t n) `(,(string->symbol (conc (to-type (t form)) "?")) ,n))
+                           (flip fourth fifth)
+                           (list %a %b)))
+                 ,(call
+                   `(,(string->symbol (conc "gsl-copy-" ((car (flip fourth fifth)) form))) ,%a) %b)
+                 (,(string->symbol (conc "la-" (second form))) ,@(flip %a %b)))))))))
 
-(define (gsl-v+ a b)
- (gsl-vector-add! (gsl-copy-vector a) b))
-(define (gsl-v- a b)
- (gsl-vector-sub! (gsl-copy-vector a) b))
-(define (gsl-v* a b)
- (gsl-vector-mul! (gsl-copy-vector a) b))
-(define (gsl-v/ a b)
- (gsl-vector-div! (gsl-copy-vector a) b))
-(define (gsl-k*v a b)
- (gsl-vector-scale! (gsl-copy-vector a) b))
-(define (gsl-k+v a b)
- (gsl-vector-add-constant! (gsl-copy-vector a) b))
+(define-gsl-binary-operator v+ "add" vector vector)
+(define-gsl-binary-operator v- "sub" vector vector)
+(define-gsl-binary-operator v* "mul" vector vector)
+(define-gsl-binary-operator v/ "div" vector vector)
+(define-gsl-binary-operator v*k "scale" vector double)
+(define-gsl-binary-operator v+k "add_constant" vector double)
 
-(define gsl-matrix-add!
- (foreign-lambda int "gsl_matrix_add" gsl:matrix gsl:matrix))
-(define gsl-matrix-sub!
- (foreign-lambda int "gsl_matrix_sub" gsl:matrix gsl:matrix))
-(define gsl-matrix-mul-elements!
- (foreign-lambda int "gsl_matrix_mul_elements" gsl:matrix gsl:matrix))
-(define gsl-matrix-div-elements!
- (foreign-lambda int "gsl_matrix_div_elements" gsl:matrix gsl:matrix))
-(define gsl-matrix-scale!
- (foreign-lambda int "gsl_matrix_scale" gsl:matrix double))
-(define gsl-matrix-add-constant!
- (foreign-lambda int "gsl_matrix_add_constant" gsl:matrix double))
+(define (k*v k v) (v*k v k))
+(define (v/k v k) (k*v (/ 1 k) v))
+(define (k+v k v) (v+k v k))
 
-(define (gsl-m+ a b)
- (gsl-matrix-add! (gsl-copy-matrix a) b))
-(define (gsl-m- a b)
- (gsl-matrix-sub! (gsl-copy-matrix a) b))
-(define (gsl-k+m k m)
- (gsl-matrix-add-constant! (gsl-copy-matrix m) k))
-(define (gsl-k*m k m)
- (gsl-matrix-scale! (gsl-copy-matrix m) k))
-(define (gsl-m*-elements a b)
- (gsl-matrix-mul-elements! (gsl-copy-matrix a) b))
-(define (gsl-m/-elements a b)
- (gsl-matrix-div-elements! (gsl-copy-matrix a) b))
+(define-gsl-binary-operator m+ "add" matrix matrix)
+(define-gsl-binary-operator m- "sub" matrix matrix)
+(define-gsl-binary-operator m*. "mul_elements" matrix matrix)
+(define-gsl-binary-operator m/. "div_elements" matrix matrix)
+(define-gsl-binary-operator m*k "scale" matrix double)
+(define-gsl-binary-operator m+k "add_constant" matrix double)
+
+(define (k*m k m) (m*k m k))
+(define (m/k m k) (k*m (/ 1 k) m))
+(define (k+m k m) (m+k m k))
 
 (define gsl-matrix-all!
  (foreign-lambda void "gsl_matrix_set_all" gsl:matrix double))
@@ -635,7 +669,7 @@
 ;; high-level API
 
 (define (eigen-symmetric matrix)
- (map gsl->scheme (gsl-eigen-symm (scheme->gsl matrix))))
+ (map gsl->matrix (gsl-eigen-symm (matrix->gsl matrix))))
 
 (define (power-of-two? n) (= (expt (/ (log n) (log 2)) 2) n))
 
