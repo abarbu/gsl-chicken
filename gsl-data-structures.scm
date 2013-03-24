@@ -7,12 +7,33 @@
 (foreign-declare "#include <gsl/gsl_eigen.h>")
 (foreign-declare "#include <gsl/gsl_linalg.h>")
 
+(foreign-declare "#include \"gsl-extras.h\"")
+
+(declare (not inline gsl-vector-ref))
+
+#>
+GSL_VECTOR_VECTOR_OP3(gsl_vector_add3, +);
+GSL_VECTOR_VECTOR_OP3(gsl_vector_sub3, -);
+GSL_VECTOR_VECTOR_OP3(gsl_vector_mul3, *);
+GSL_VECTOR_VECTOR_OP3(gsl_vector_div3, /);
+GSL_VECTOR_SCALAR_OP3(gsl_vector_scale3, *);
+GSL_VECTOR_SCALAR_OP3(gsl_vector_add_constant3, +);
+
+GSL_MATRIX_MATRIX_OP3(gsl_matrix_add3, +);
+GSL_MATRIX_MATRIX_OP3(gsl_matrix_sub3, -);
+GSL_MATRIX_MATRIX_OP3(gsl_matrix_mul_elements3, *);
+GSL_MATRIX_MATRIX_OP3(gsl_matrix_div_elements3, /);
+GSL_MATRIX_SCALAR_OP3(gsl_matrix_scale3, *);
+GSL_MATRIX_SCALAR_OP3(gsl_matrix_add_constant3, +);
+GSL_MATRIX_SCALAR_DIAGONAL_OP3(gsl_matrix_add_diagonal3, +)
+<#
+
 ;;; General
 
 (define-syntax define-gsl-binary-operator
  (er-macro-transformer
   (lambda (form rename compare)
-   (let* ((%a (rename 'a)) (%b (rename 'b))
+   (let* ((%a (rename 'a)) (%b (rename 'b)) (%c (rename 'c))
           (%let (rename 'let)) (%obj (rename 'obj))
           (flip? (and (> (length form) 5) (equal? (last form) 'flip)))
           (flip (lambda (a b) (if flip? (list b a) (list a b))))
@@ -25,9 +46,16 @@
                          ((foreign-lambda int ,(conc "gsl_" (car (flip (fourth form) (fifth form))) "_" (third form))
                                           ,@(map type-prefix (flip (fourth form) (fifth form))))
                           ,%obj ,b)
-                          ,%obj))))
-    `(begin (define (,(string->symbol (conc (second form) "!")) ,@(flip %a %b))
+                         ,%obj))))
+    `(begin (define (,(string->symbol (conc (second form) "!!")) ,@(flip %a %b))
              ,(call %a %b))
+            (define (,(string->symbol (conc (second form) "!")) ,%c ,@(flip %a %b))
+             ((foreign-lambda int
+                              ,(conc "gsl_" (car (flip (fourth form) (fifth form))) "_" (third form) "3")
+                              ,(type-prefix (car (flip (fourth form) (fifth form))))
+                              ,@(map type-prefix (flip (fourth form) (fifth form))))
+              ,%c ,@(flip %a %b))
+             ,%c)
             (define (,(second form) ,@(flip %a %b))
              (if (and ,@(map (lambda (t n) `(,(string->symbol (conc (to-type (t form)) "?")) ,n))
                            (flip fourth fifth)
@@ -247,6 +275,7 @@
         (loop (+ i 1)))))))
 
 (define gsl-vector-ref (foreign-lambda double "gsl_vector_get" gsl:vector unsigned-int))
+
 (define gsl-vector-set! (foreign-lambda void "gsl_vector_set" gsl:vector unsigned-int double))
 (define gsl-vector-pointer (foreign-lambda c-pointer "gsl_vector_ptr" gsl:vector unsigned-int))
 
@@ -351,12 +380,10 @@
                            obj i j))
              (loopj (+ j 1)))))))))
 
-(define gsl-matrix-get
+(define gsl-matrix-ref
  (foreign-lambda double "gsl_matrix_get" gsl:matrix unsigned-int unsigned-int))
-(define gsl-matrix-set
+(define gsl-matrix-set!
  (foreign-lambda void "gsl_matrix_set" gsl:matrix unsigned-int unsigned-int double))
-(define gsl-matrix-transpose
- (foreign-lambda int "gsl_matrix_transpose" gsl:matrix))
 (define gsl-matrix-swap-rows
  (foreign-lambda int "gsl_matrix_swap_rows" gsl:matrix unsigned-int unsigned-int))
 (define gsl-matrix-swap-columns
@@ -384,12 +411,23 @@
   (gsl-matrix-memcpy new-m m)
   new-m))
 
+(define (gsl:matrix-transpose m)
+ (let ((n (gsl-copy-matrix m)))
+  ((foreign-lambda int "gsl_matrix_transpose_memcpy" gsl:matrix gsl:matrix) n m)
+  n))
+
+(define (matrix-transpose m)
+ (if (gsl:matrix? m)
+     (gsl:matrix-transpose m)
+     (la-matrix-transpose m)))
+
 (define-gsl-binary-operator m+ "add" matrix matrix)
 (define-gsl-binary-operator m- "sub" matrix matrix)
 (define-gsl-binary-operator m*. "mul_elements" matrix matrix)
 (define-gsl-binary-operator m/. "div_elements" matrix matrix)
 (define-gsl-binary-operator m*k "scale" matrix double)
 (define-gsl-binary-operator m+k "add_constant" matrix double)
+(define-gsl-binary-operator m+k-diagonal "add_diagonal" matrix double)
 
 (define (k*m k m) (m*k m k))
 (define (m/k m k) (k*m (/ 1 k) m))
